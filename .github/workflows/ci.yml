@@ -42,6 +42,14 @@ jobs:
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      - run: npm publish --access public --provenance
+      # Prerelease tags (anything with a '-') publish under the `alpha`
+      # dist-tag; stable tags publish as `latest`.
+      - run: |
+          if [[ "${{ github.ref_name }}" == *"-"* ]]; then
+            NPM_TAG="alpha"
+          else
+            NPM_TAG="latest"
+          fi
+          npm publish --access public --provenance --tag "$NPM_TAG"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
