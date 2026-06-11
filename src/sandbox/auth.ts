@@ -27,6 +27,12 @@ export interface TokenExchangeAuthOptions {
   clientSecret?: string;
   /** Audience the apiserver expects (its --oidc-client-id / authenticator audience). */
   audience: string;
+  /**
+   * OAuth scopes to request on the exchange. When the audience mapper lives
+   * on an optional client scope (so ordinary logins never carry the apiserver
+   * audience), that scope must be requested here, e.g. 'openid kubernetes-api'.
+   */
+  scope?: string;
   /** Supplier of the end user's raw bearer token for the current request. */
   subjectToken: () => string | Promise<string>;
   /**
@@ -116,6 +122,9 @@ export class TokenExchangeCredentialProvider implements CredentialProvider {
     });
     if (this.options.clientSecret) {
       body.set('client_secret', this.options.clientSecret);
+    }
+    if (this.options.scope) {
+      body.set('scope', this.options.scope);
     }
 
     const response = await fetch(this.options.tokenUrl, {

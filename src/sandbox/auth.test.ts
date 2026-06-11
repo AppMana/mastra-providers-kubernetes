@@ -10,6 +10,7 @@ function makeProvider(subjectToken = 'subject-token') {
     clientId: 'app',
     clientSecret: 'secret',
     audience: 'serverclient',
+    scope: 'openid kubernetes-api',
     subjectToken: () => subjectToken,
     server: 'https://kubernetes.example.com:6443',
     skipTLSVerify: true,
@@ -44,6 +45,7 @@ describe('TokenExchangeCredentialProvider', () => {
     expect(body.get('audience')).toBe('serverclient');
     expect(body.get('client_id')).toBe('app');
     expect(body.get('client_secret')).toBe('secret');
+    expect(body.get('scope')).toBe('openid kubernetes-api');
 
     expect(kc.getCurrentUser()?.token).toBe('exchanged-token');
     expect(kc.getCurrentCluster()?.server).toBe('https://kubernetes.example.com:6443');
