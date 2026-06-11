@@ -1,0 +1,46 @@
+{
+  "name": "@appmana-public/mastra-provider-kubernetes",
+  "version": "0.1.0",
+  "description": "Kubernetes workspace sandbox provider for Mastra, backed by kubernetes-sigs/agent-sandbox",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AppMana/mastra-providers-kubernetes.git"
+  },
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --clean",
+    "test": "vitest run --exclude '**/*.integration.test.ts'",
+    "test:integration": "vitest run src/sandbox/index.integration.test.ts",
+    "lint": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@mastra/core": ">=1.0.0"
+  },
+  "dependencies": {
+    "@kubernetes/client-node": "^1.4.0"
+  },
+  "devDependencies": {
+    "@mastra/core": "^1.41.0",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.0"
+  },
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=20"
+  }
+}
