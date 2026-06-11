@@ -462,15 +462,21 @@ export class KubernetesSandbox extends MastraSandbox {
       }
 
       if (pod) {
-        const ready = pod.status?.conditions?.find(c => c.type === 'Ready');
-        if (ready?.status === 'True') {
-          if (!this._containerName) {
-            this._containerName = pod.spec?.containers?.[0]?.name;
-            this._templateImage = pod.spec?.containers?.[0]?.image;
+        if (pod.metadata?.deletionTimestamp) {
+          // A terminating pod can still report Ready while its volumes are
+          // being torn down (suspend/resume race) — wait for its replacement.
+          lastReason = 'previous pod still terminating';
+        } else {
+          const ready = pod.status?.conditions?.find(c => c.type === 'Ready');
+          if (ready?.status === 'True') {
+            if (!this._containerName) {
+              this._containerName = pod.spec?.containers?.[0]?.name;
+              this._templateImage = pod.spec?.containers?.[0]?.image;
+            }
+            return;
           }
-          return;
+          lastReason = `phase=${pod.status?.phase ?? 'Unknown'} ready=${ready?.status ?? 'Unknown'}`;
         }
-        lastReason = `phase=${pod.status?.phase ?? 'Unknown'} ready=${ready?.status ?? 'Unknown'}`;
       }
 
       await sleep(2000);
