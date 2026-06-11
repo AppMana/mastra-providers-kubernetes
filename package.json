@@ -23,6 +23,7 @@
   ],
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts --clean",
+    "prepare": "tsup src/index.ts --format esm --dts --clean",
     "test": "vitest run --exclude '**/*.integration.test.ts'",
     "test:integration": "vitest run src/sandbox/index.integration.test.ts",
     "lint": "tsc --noEmit"
