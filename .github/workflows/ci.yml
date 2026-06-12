@@ -28,8 +28,9 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: test
     runs-on: ubuntu-latest
-    # npm Trusted Publishing: auth is the GitHub OIDC token (id-token: write);
-    # NODE_AUTH_TOKEN only satisfies setup-node's registry configuration.
+    # npm Trusted Publishing: auth is the GitHub OIDC token (id-token: write).
+    # Requires npm >= 11.5.1 and NO NODE_AUTH_TOKEN (a configured token
+    # preempts the OIDC exchange).
     permissions:
       contents: read
       id-token: write
@@ -39,6 +40,7 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
+      - run: npm install -g npm@latest
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
@@ -51,5 +53,3 @@ jobs:
             NPM_TAG="latest"
           fi
           npm publish --access public --provenance --tag "$NPM_TAG"
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
