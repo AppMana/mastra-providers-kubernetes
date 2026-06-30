@@ -4,20 +4,23 @@ A [Mastra](https://mastra.ai) workspace sandbox provider that runs coding/termin
 workspaces as ordinary Kubernetes objects, backed by
 [kubernetes-sigs/agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox).
 
-Each Mastra workspace maps to one `Sandbox` (a singleton stateful pod) plus
-`PersistentVolumeClaim`s in a tenant namespace. Quotas, cleanup, GPU resource
-requests, network policy, and persistence are all handled by ordinary,
-decoupled Kubernetes features — this package is a thin client, not a controller.
+Each Mastra workspace maps to one `SandboxClaim` in a tenant namespace. The
+agent-sandbox extensions controller resolves that claim into a concrete
+`Sandbox` (a singleton stateful pod) and any backing storage. Quotas, cleanup,
+GPU resource requests, network policy, and persistence are all handled by
+ordinary, decoupled Kubernetes features — this package is a thin client, not a
+controller.
 
 ## How it works
 
 - **Templates are platform-owned.** A `SandboxTemplate` in the tenant namespace
   pins the image, resources, `serviceAccountName`, and (managed) NetworkPolicy.
   The provider refuses templates without a `serviceAccountName`.
-- **Instances are `Sandbox` objects** stamped from the template. Suspend deletes
-  the pod and keeps the PVCs; resume recreates the pod. The provider slides
-  `shutdownTime` forward on activity, so idle workspaces suspend without any
-  custom controller.
+- **Instances are `SandboxClaim` objects** referencing a template. The
+  extensions controller creates the concrete `Sandbox` and pod. Suspend deletes
+  the pod and keeps retained storage; resume recreates the pod. The provider
+  slides `shutdownTime` forward on activity, so idle workspaces suspend without
+  any custom controller.
 - **Zero trust.** Every API call is made with a credential derived from the end
   user's OIDC token via OAuth2 token exchange (RFC 8693). The provider holds no
   standing cluster credentials; RBAC and audit are enforced per user by the
@@ -72,8 +75,10 @@ const agent = new Agent({
    additional JWT authenticator in a structured `AuthenticationConfiguration`),
    and your IdP permits RFC 8693 token exchange from the app's client to the
    apiserver audience.
-3. Per-tenant RBAC granting users `sandboxes.agents.x-k8s.io` CRUD,
-   `sandboxtemplates` read, `pods` read, and `pods/exec` in their namespace.
+3. Per-tenant RBAC granting users `sandboxclaims.extensions.agents.x-k8s.io`
+   CRUD, `sandboxtemplates` read, `pods` read, and `pods/exec` in their
+   namespace. Direct `sandboxes.agents.x-k8s.io` CRUD is only needed when using
+   `resourceMode: "sandbox"` for migration.
 
 ## Workspace images
 

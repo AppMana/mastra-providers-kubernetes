@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { CoreV1Api, CustomObjectsApi } from '@kubernetes/client-node';
 import type { V1Status } from '@kubernetes/client-node';
 import { exitCodeFromStatus } from './exec';
 import { KubernetesSandbox } from './index';
@@ -44,6 +45,97 @@ describe('KubernetesSandbox namespace guard', () => {
       namespacePattern: /^workspace-[a-z-]+$/,
     });
     expect(sandbox.namespace).toBe('workspace-smoke');
+  });
+});
+
+describe('KubernetesSandbox SandboxClaim lifecycle', () => {
+  it('creates a SandboxClaim and executes against the claimed sandbox pod', async () => {
+    const created: Array<Record<string, unknown>> = [];
+    const patched: Array<Record<string, unknown>> = [];
+    let claimCreated = false;
+
+    const custom = {
+      getNamespacedCustomObject: vi.fn(async ({ plural, name }: { plural: string; name: string }) => {
+        if (plural === 'sandboxclaims' && name === 'ws-test-thread') {
+          if (!claimCreated) {
+            const error = new Error('not found') as Error & { code: number };
+            error.code = 404;
+            throw error;
+          }
+          return {
+            status: {
+              sandbox: {
+                name: 'sandbox-from-claim',
+              },
+            },
+          };
+        }
+        throw new Error(`unexpected get ${plural}/${name}`);
+      }),
+      createNamespacedCustomObject: vi.fn(async ({ body }: { body: Record<string, unknown> }) => {
+        created.push(body);
+        claimCreated = true;
+        return body;
+      }),
+      patchNamespacedCustomObject: vi.fn(async ({ body }: { body: Record<string, unknown> }) => {
+        patched.push(body);
+        return body;
+      }),
+    };
+    const core = {
+      readNamespacedPod: vi.fn(async ({ name }: { name: string }) => ({
+        metadata: { name },
+        spec: { containers: [{ name: 'workspace', image: 'workspace-image' }] },
+        status: { conditions: [{ type: 'Ready', status: 'True' }] },
+      })),
+    };
+    const kc = {
+      makeApiClient: vi.fn(api => {
+        if (api === CustomObjectsApi) return custom;
+        if (api === CoreV1Api) return core;
+        throw new Error('unexpected api client');
+      }),
+    };
+
+    const sandbox = new KubernetesSandbox({
+      id: 'test-thread',
+      namespace: 'user-7f3a1b2c-9d4e-4f5a-8b6c-1d2e3f4a5b6c',
+      sandboxTemplateName: 'workspace-base',
+      auth,
+    });
+    vi.spyOn(sandbox, 'kubeConfig').mockResolvedValue(kc as never);
+    vi.spyOn(sandbox.processes, 'runScript').mockResolvedValue({ exitCode: 0, stdout: 'ok', stderr: '' });
+
+    await sandbox.start();
+    const result = await sandbox.executeCommand('pwd');
+
+    expect(result.stdout).toBe('ok');
+    expect(created).toHaveLength(1);
+    expect(created[0]).toMatchObject({
+      apiVersion: 'extensions.agents.x-k8s.io/v1alpha1',
+      kind: 'SandboxClaim',
+      metadata: {
+        name: 'ws-test-thread',
+        namespace: 'user-7f3a1b2c-9d4e-4f5a-8b6c-1d2e3f4a5b6c',
+      },
+      spec: {
+        sandboxTemplateRef: { name: 'workspace-base' },
+        lifecycle: { shutdownPolicy: 'Retain' },
+      },
+    });
+    expect(core.readNamespacedPod).toHaveBeenCalledWith({
+      name: 'sandbox-from-claim',
+      namespace: 'user-7f3a1b2c-9d4e-4f5a-8b6c-1d2e3f4a5b6c',
+    });
+    expect(sandbox.podName).toBe('sandbox-from-claim');
+    expect(custom.patchNamespacedCustomObject).toHaveBeenCalled();
+    expect(patched.at(-1)).toMatchObject({
+      spec: {
+        lifecycle: {
+          shutdownPolicy: 'Retain',
+        },
+      },
+    });
   });
 });
 

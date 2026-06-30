@@ -33,6 +33,9 @@ export const SANDBOX_PLURAL = 'sandboxes';
 export const TEMPLATE_GROUP = 'extensions.agents.x-k8s.io';
 export const TEMPLATE_VERSION = 'v1alpha1';
 export const TEMPLATE_PLURAL = 'sandboxtemplates';
+export const CLAIM_GROUP = 'extensions.agents.x-k8s.io';
+export const CLAIM_VERSION = 'v1alpha1';
+export const CLAIM_PLURAL = 'sandboxclaims';
 
 /** Default tenant-namespace pattern: per-user namespaces (`user-<oidc sub>`). */
 export const DEFAULT_NAMESPACE_PATTERN = /^user-[0-9a-f-]+$/;
@@ -66,8 +69,38 @@ interface SandboxResource {
   };
 }
 
+interface SandboxClaimResource {
+  apiVersion: string;
+  kind: 'SandboxClaim';
+  metadata: {
+    name: string;
+    namespace?: string;
+    labels?: Record<string, string>;
+    annotations?: Record<string, string>;
+  };
+  spec: {
+    sandboxTemplateRef: { name: string };
+    additionalPodMetadata?: {
+      labels?: Record<string, string>;
+      annotations?: Record<string, string>;
+    };
+    lifecycle?: {
+      shutdownTime?: string;
+      shutdownPolicy?: 'Retain' | 'Delete' | 'DeleteForeground';
+    };
+    warmpool?: string;
+  };
+  status?: {
+    conditions?: Array<{ type: string; status: string; reason?: string; message?: string }>;
+    sandbox?: {
+      name?: string;
+      podIPs?: string[];
+    };
+  };
+}
+
 export interface KubernetesSandboxOptions extends Omit<MastraSandboxOptions, 'processes'> {
-  /** Stable identifier; the Sandbox object is named `ws-<id>`. */
+  /** Stable identifier; the SandboxClaim object is named `ws-<id>`. */
   id?: string;
   /** Tenant namespace the Sandbox lives in (e.g. `user-<oidc sub>`). */
   namespace: string;
@@ -98,6 +131,15 @@ export interface KubernetesSandboxOptions extends Omit<MastraSandboxOptions, 'pr
   /** Extra annotations for the Sandbox object (e.g. agent/thread ids). */
   annotations?: Record<string, string>;
   /**
+   * Resource to create. `sandboxClaim` is the platform path: the
+   * agent-sandbox extensions controller owns the concrete Sandbox/Pod.
+   * `sandbox` is retained for migration tests and emergency fallback only.
+   * @default 'sandboxClaim'
+   */
+  resourceMode?: 'sandboxClaim' | 'sandbox';
+  /** Optional warm pool name for SandboxClaim scheduling. */
+  warmpool?: string;
+  /**
    * Pattern the tenant namespace must match. Defense-in-depth only — real
    * enforcement is apiserver RBAC on the user-derived credential.
    * @default /^user-[0-9a-f-]+$/
@@ -126,10 +168,13 @@ export class KubernetesSandbox extends MastraSandbox {
   private readonly _readyTimeoutMs: number;
   private readonly _labels: Record<string, string>;
   private readonly _annotations: Record<string, string>;
+  private readonly _resourceMode: 'sandboxClaim' | 'sandbox';
+  private readonly _warmpool: string | undefined;
   private readonly _instructionsOverride?: InstructionsOption;
   private _containerName: string | undefined;
   private _lastActivityBumpMs = 0;
   private _templateImage: string | undefined;
+  private _sandboxName: string | undefined;
 
   constructor(options: KubernetesSandboxOptions) {
     const processes = new KubernetesProcessManager({
@@ -155,6 +200,8 @@ export class KubernetesSandbox extends MastraSandbox {
     this._idleTimeoutS = options.idleTimeoutSeconds ?? 3600;
     this._readyTimeoutMs = options.readyTimeoutMs ?? 300_000;
     this._containerName = options.containerName;
+    this._resourceMode = options.resourceMode ?? 'sandboxClaim';
+    this._warmpool = options.warmpool;
     this._instructionsOverride = options.instructions;
     this._labels = {
       'app.kubernetes.io/managed-by': 'mastra',
@@ -166,14 +213,19 @@ export class KubernetesSandbox extends MastraSandbox {
     processes.attach(this);
   }
 
-  /** The Sandbox object name. */
+  /** The SandboxClaim object name, and the direct Sandbox name in resourceMode=sandbox. */
   get sandboxName(): string {
     return `ws-${this.id}`;
   }
 
-  /** The pod name (agent-sandbox names the pod after the Sandbox). */
+  /** The concrete Sandbox object name created for this workspace. */
+  get runtimeSandboxName(): string {
+    return this._sandboxName ?? this.sandboxName;
+  }
+
+  /** The pod name (agent-sandbox names the pod after the concrete Sandbox). */
   get podName(): string {
-    return this.sandboxName;
+    return this.runtimeSandboxName;
   }
 
   /** Container commands exec into. Resolved from the template at start(). */
@@ -196,6 +248,14 @@ export class KubernetesSandbox extends MastraSandbox {
   async start(): Promise<void> {
     const kc = await this.kubeConfig();
     const custom = kc.makeApiClient(CustomObjectsApi);
+
+    if (this._resourceMode === 'sandboxClaim') {
+      await this._ensureSandboxClaim(custom);
+      await this._waitForClaimSandbox(custom);
+      await this._waitForPodReady(kc);
+      this._lastActivityBumpMs = Date.now();
+      return;
+    }
 
     const existing = await this._getSandbox(custom);
     if (existing) {
@@ -241,6 +301,17 @@ export class KubernetesSandbox extends MastraSandbox {
   async stop(): Promise<void> {
     const kc = await this.kubeConfig();
     const custom = kc.makeApiClient(CustomObjectsApi);
+    if (this._resourceMode === 'sandboxClaim') {
+      const existing = await this._getSandboxClaim(custom);
+      if (!existing) return;
+      this.logger.debug(`${LOG_PREFIX} Suspending SandboxClaim ${this.namespace}/${this.sandboxName}`);
+      await this._patchSandboxClaim(custom, {
+        spec: { lifecycle: { shutdownTime: new Date().toISOString(), shutdownPolicy: 'Retain' } },
+      });
+      this.processes.reset();
+      return;
+    }
+
     const existing = await this._getSandbox(custom);
     if (!existing) return;
     this.logger.debug(`${LOG_PREFIX} Suspending Sandbox ${this.namespace}/${this.sandboxName}`);
@@ -251,6 +322,23 @@ export class KubernetesSandbox extends MastraSandbox {
   async destroy(): Promise<void> {
     const kc = await this.kubeConfig();
     const custom = kc.makeApiClient(CustomObjectsApi);
+    if (this._resourceMode === 'sandboxClaim') {
+      this.logger.debug(`${LOG_PREFIX} Deleting SandboxClaim ${this.namespace}/${this.sandboxName}`);
+      try {
+        await custom.deleteNamespacedCustomObject({
+          group: CLAIM_GROUP,
+          version: CLAIM_VERSION,
+          namespace: this.namespace,
+          plural: CLAIM_PLURAL,
+          name: this.sandboxName,
+        });
+      } catch (error) {
+        if (!isNotFound(error)) throw error;
+      }
+      this.processes.reset();
+      return;
+    }
+
     this.logger.debug(`${LOG_PREFIX} Deleting Sandbox ${this.namespace}/${this.sandboxName}`);
     try {
       await custom.deleteNamespacedCustomObject({
@@ -279,7 +367,13 @@ export class KubernetesSandbox extends MastraSandbox {
     try {
       const kc = await this.kubeConfig();
       const custom = kc.makeApiClient(CustomObjectsApi);
-      await this._patchSandbox(custom, { spec: { shutdownTime: this._nextShutdownTime() } });
+      if (this._resourceMode === 'sandboxClaim') {
+        await this._patchSandboxClaim(custom, {
+          spec: { lifecycle: { shutdownTime: this._nextShutdownTime(), shutdownPolicy: 'Retain' } },
+        });
+      } else {
+        await this._patchSandbox(custom, { spec: { shutdownTime: this._nextShutdownTime() } });
+      }
     } catch (error) {
       this.logger.warn(`${LOG_PREFIX} Failed to slide shutdownTime for ${this.sandboxName}`, { error });
     }
@@ -349,7 +443,8 @@ export class KubernetesSandbox extends MastraSandbox {
       createdAt: new Date(),
       metadata: {
         namespace: this.namespace,
-        sandbox: this.sandboxName,
+        sandboxClaim: this._resourceMode === 'sandboxClaim' ? this.sandboxName : undefined,
+        sandbox: this.runtimeSandboxName,
         template: this._templateName,
         workingDir: this.workingDir,
       },
@@ -381,6 +476,110 @@ export class KubernetesSandbox extends MastraSandbox {
       if (isNotFound(error)) return null;
       throw error;
     }
+  }
+
+  private async _getSandboxClaim(custom: CustomObjectsApi): Promise<SandboxClaimResource | null> {
+    try {
+      return (await custom.getNamespacedCustomObject({
+        group: CLAIM_GROUP,
+        version: CLAIM_VERSION,
+        namespace: this.namespace,
+        plural: CLAIM_PLURAL,
+        name: this.sandboxName,
+      })) as unknown as SandboxClaimResource;
+    } catch (error) {
+      if (isNotFound(error)) return null;
+      throw error;
+    }
+  }
+
+  private async _ensureSandboxClaim(custom: CustomObjectsApi): Promise<void> {
+    const body: SandboxClaimResource = {
+      apiVersion: `${CLAIM_GROUP}/${CLAIM_VERSION}`,
+      kind: 'SandboxClaim',
+      metadata: {
+        name: this.sandboxName,
+        namespace: this.namespace,
+        labels: { ...this._labels, 'appmana.com/sandbox-template': this._templateName },
+        annotations: this._annotations,
+      },
+      spec: {
+        sandboxTemplateRef: { name: this._templateName },
+        additionalPodMetadata: {
+          labels: this._labels,
+          annotations: this._annotations,
+        },
+        lifecycle: {
+          shutdownTime: this._nextShutdownTime(),
+          shutdownPolicy: 'Retain',
+        },
+        ...(this._warmpool ? { warmpool: this._warmpool } : {}),
+      },
+    };
+
+    const existing = await this._getSandboxClaim(custom);
+    if (existing) {
+      this.logger.debug(`${LOG_PREFIX} Refreshing SandboxClaim ${this.namespace}/${this.sandboxName}`);
+      await this._patchSandboxClaim(custom, {
+        metadata: {
+          labels: body.metadata.labels,
+          annotations: body.metadata.annotations,
+        },
+        spec: body.spec,
+      });
+      return;
+    }
+
+    this.logger.debug(
+      `${LOG_PREFIX} Creating SandboxClaim ${this.namespace}/${this.sandboxName} for template ${this._templateName}`,
+    );
+    await custom.createNamespacedCustomObject({
+      group: CLAIM_GROUP,
+      version: CLAIM_VERSION,
+      namespace: this.namespace,
+      plural: CLAIM_PLURAL,
+      body,
+    });
+  }
+
+  private async _patchSandboxClaim(custom: CustomObjectsApi, patch: Record<string, unknown>): Promise<void> {
+    await custom.patchNamespacedCustomObject(
+      {
+        group: CLAIM_GROUP,
+        version: CLAIM_VERSION,
+        namespace: this.namespace,
+        plural: CLAIM_PLURAL,
+        name: this.sandboxName,
+        body: patch,
+      },
+      setHeaderOptions('Content-Type', PatchStrategy.MergePatch),
+    );
+  }
+
+  private async _waitForClaimSandbox(custom: CustomObjectsApi): Promise<void> {
+    const deadline = Date.now() + this._readyTimeoutMs;
+    let lastReason = 'claim has no sandbox status yet';
+
+    while (Date.now() < deadline) {
+      const claim = await this._getSandboxClaim(custom);
+      const sandboxName = claim?.status?.sandbox?.name;
+      if (sandboxName) {
+        this._sandboxName = sandboxName;
+        return;
+      }
+
+      const ready = claim?.status?.conditions?.find(c => c.type === 'Ready');
+      if (ready) {
+        lastReason = `Ready=${ready.status} ${ready.reason ?? ''} ${ready.message ?? ''}`.trim();
+      }
+      await sleep(2000);
+    }
+
+    throw new SandboxError(
+      `${LOG_PREFIX} SandboxClaim ${this.namespace}/${this.sandboxName} did not report a Sandbox within ${this._readyTimeoutMs}ms (${lastReason}).`,
+      'NOT_READY',
+      { claim: this.sandboxName, namespace: this.namespace },
+    );
   }
 
   private async _patchSandbox(custom: CustomObjectsApi, patch: Record<string, unknown>): Promise<void> {
