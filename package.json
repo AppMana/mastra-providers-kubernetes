@@ -1,6 +1,6 @@
 {
   "name": "@appmana-public/mastra-provider-kubernetes",
-  "version": "0.1.0-alpha.4",
+  "version": "0.1.0-alpha.5",
   "description": "Kubernetes workspace sandbox provider for Mastra, backed by kubernetes-sigs/agent-sandbox",
   "license": "Apache-2.0",
   "repository": {

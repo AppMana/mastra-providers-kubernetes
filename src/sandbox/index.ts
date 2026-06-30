@@ -204,7 +204,7 @@ export class KubernetesSandbox extends MastraSandbox {
     this._warmpool = options.warmpool;
     this._instructionsOverride = options.instructions;
     this._labels = {
-      'app.kubernetes.io/managed-by': 'mastra',
+      'appmana.com/managed-by': 'mastra',
       'appmana.com/workspace-id': this.id,
       ...options.labels,
     };

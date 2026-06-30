@@ -123,6 +123,14 @@ describe('KubernetesSandbox SandboxClaim lifecycle', () => {
         lifecycle: { shutdownPolicy: 'Retain' },
       },
     });
+    const claim = created[0] as {
+      spec?: { additionalPodMetadata?: { labels?: Record<string, string> } };
+    };
+    expect(claim.spec?.additionalPodMetadata?.labels).toMatchObject({
+      'appmana.com/managed-by': 'mastra',
+      'appmana.com/workspace-id': 'test-thread',
+    });
+    expect(claim.spec?.additionalPodMetadata?.labels).not.toHaveProperty('app.kubernetes.io/managed-by');
     expect(core.readNamespacedPod).toHaveBeenCalledWith({
       name: 'sandbox-from-claim',
       namespace: 'user-7f3a1b2c-9d4e-4f5a-8b6c-1d2e3f4a5b6c',
